@@ -7,17 +7,25 @@ import urllib
 from distutils.version import LooseVersion as V
 
 import jwt
+import msal
 from jupyterhub.auth import LocalAuthenticator
 from tornado.httpclient import HTTPRequest
 from traitlets import Unicode, default
 
-from oauthenticator.oauth2 import OAuthenticator
-
+from oauthenticator.oauth2 import OAuthenticator, OAuthLoginHandler
 
 # pyjwt 2.0 has changed its signature,
 # but mwoauth pins to pyjwt 1.x
 PYJWT_2 = V(jwt.__version__) >= V("2.0")
 
+class ICLLoginHandler(OAuthLoginHandler):
+
+    def authorize_redirect(self, *args, **kwargs):
+        secret = self.authenticator.client_secret
+
+        print('secret is ', self.authenticator.__dict__)
+
+        return super().authorize_redirect(*args, client_secret=secret, **kwargs)
 
 class ICLOAuthenticator(OAuthenticator):
     login_service = Unicode(
@@ -27,6 +35,8 @@ class ICLOAuthenticator(OAuthenticator):
 	)
 
     tenant_id = Unicode(config=True, help="The Azure Active Directory Tenant ID")
+
+    login_handler = ICLLoginHandler
 
     @default('tenant_id')
     def _tenant_id_default(self):
@@ -46,36 +56,29 @@ class ICLOAuthenticator(OAuthenticator):
     def _token_url_default(self):
         return 'https://login.microsoftonline.com/{0}/oauth2/token'.format(self.tenant_id)
 
+
+
     async def authenticate(self, handler, data=None):
+        authority = f'https://login.microsoftonline.com/{self.tenant_id}'
+
+        self.aad = msal.ConfidentialClientApplication(self.client_id,
+                                                 self.client_secret,
+                                                 authority)
+
+        self.authorize_url=self.aad.get_authorization_request_url([])
+
+        print(self.authorize_url)
+
         code = handler.get_argument("code")
 
-        params = dict(
-            client_id=self.client_id,
-            client_secret=self.client_secret,
-            grant_type='authorization_code',
-            code=code,
-            redirect_uri=self.get_callback_url(handler))
+        response = self.aad.acquire_token_by_authorization_code(code,
+                                                           scopes=[], 
+                                                           redirect_uri=self.get_callback_url(handler))
 
-        data = urllib.parse.urlencode(
-            params, doseq=True, encoding='utf-8', safe='=')
+        print(response)
 
-        url = self.token_url
-
-        headers = {
-            'Content-Type':
-            'application/x-www-form-urlencoded; charset=UTF-8'
-        }
-        req = HTTPRequest(
-            url,
-            method="POST",
-            headers=headers,
-            body=data  # Body is required for a POST...
-        )
-
-        resp_json = await self.fetch(req)
-
-        access_token = resp_json['access_token']
-        id_token = resp_json['id_token']
+        access_token = response['access_token']
+        id_token = response['id_token']
 
         if PYJWT_2:
             decoded = jwt.decode(
@@ -89,9 +92,9 @@ class ICLOAuthenticator(OAuthenticator):
 
         print(decoded)
 
-        decoded["name"] = decoded['unique_name'].split('@')[0]
+        decoded["name"] = decoded['preferred_username'].split('@')[0]
         
-        userdict = {"name": decoded['unique_name'].split('@')[0]}
+        userdict = {"name": decoded["name"]}
         userdict["auth_state"] = auth_state = {}
         auth_state['access_token'] = access_token
         # results in a decoded JWT for the user data
