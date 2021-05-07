@@ -65,8 +65,6 @@ class ICLOAuthenticator(OAuthenticator):
                                                  self.client_secret,
                                                  authority)
 
-        self.authorize_url=self.aad.get_authorization_request_url([])
-
         print(self.authorize_url)
 
         code = handler.get_argument("code")
